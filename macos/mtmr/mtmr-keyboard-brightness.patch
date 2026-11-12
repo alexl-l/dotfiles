@@ -1,0 +1,653 @@
+diff --git a/MTMR/AppSettings.swift b/MTMR/AppSettings.swift
+index 6f573ef..2c940f2 100644
+--- a/MTMR/AppSettings.swift
++++ b/MTMR/AppSettings.swift
+@@ -4,6 +4,15 @@ struct AppSettings {
+     @UserDefault(key: "com.toxblh.mtmr.settings.showControlStrip", defaultValue: false)
+     static var showControlStripState: Bool
+     
++    // Icon colors: 0 their own colors, 1 all white, 2 rainbow from left to right. The
++    // "com.toxblh.mtmr.nextColorMode" Darwin notification moves to the next one
++    // (e.g. `notifyutil -p com.toxblh.mtmr.nextColorMode`)
++    @UserDefault(key: "com.toxblh.mtmr.settings.colorMode", defaultValue: 0)
++    static var colorMode: Int
++
++    static var monochrome: Bool { colorMode == 1 }
++    static var rainbow: Bool { colorMode == 2 }
++
+     @UserDefault(key: "com.toxblh.mtmr.settings.hapticFeedback", defaultValue: true)
+     static var hapticFeedbackState: Bool
+     
+diff --git a/MTMR/CustomButtonTouchBarItem.swift b/MTMR/CustomButtonTouchBarItem.swift
+index aff23bd..c29ef62 100644
+--- a/MTMR/CustomButtonTouchBarItem.swift
++++ b/MTMR/CustomButtonTouchBarItem.swift
+@@ -89,10 +89,24 @@ class CustomButtonTouchBarItem: NSCustomTouchBarItem, NSGestureRecognizerDelegat
+     var attributedTitle: NSAttributedString {
+         didSet {
+             button?.imagePosition = attributedTitle.length > 0 ? .imageLeading : .imageOnly
+-            button?.attributedTitle = attributedTitle
++            button?.attributedTitle = coloredTitle
+         }
+     }
+ 
++    // Overrides the title's text color (rainbow mode), also for titles set later
++    var titleColor: NSColor? {
++        didSet {
++            button?.attributedTitle = coloredTitle
++        }
++    }
++
++    private var coloredTitle: NSAttributedString {
++        guard let color = titleColor else { return attributedTitle }
++        let title = NSMutableAttributedString(attributedString: attributedTitle)
++        title.addAttribute(.foregroundColor, value: color, range: NSRange(location: 0, length: title.length))
++        return title
++    }
++
+     var image: NSImage? {
+         didSet {
+             button.image = image
+diff --git a/MTMR/Customizer/ItemCatalog.swift b/MTMR/Customizer/ItemCatalog.swift
+index 24fd6be..b80b582 100644
+--- a/MTMR/Customizer/ItemCatalog.swift
++++ b/MTMR/Customizer/ItemCatalog.swift
+@@ -107,6 +107,7 @@ enum ItemCatalog {
+ 
+         // MARK: Sliders
+         ItemTypeInfo(type: "brightness", displayName: "Brightness Slider", category: .sliders, symbolName: "sun.max", summary: "Slider for the display brightness.", fields: [refresh(0.5)], supportsActions: false, defaultJSON: obj("brightness")),
++        ItemTypeInfo(type: "keyboardBrightness", displayName: "Keyboard Backlight Slider", category: .sliders, symbolName: "light.max", summary: "Slider for the keyboard backlight.", fields: [refresh(0.5)], supportsActions: false, defaultJSON: obj("keyboardBrightness")),
+         ItemTypeInfo(type: "volume", displayName: "Volume Slider", category: .sliders, symbolName: "speaker.wave.3", summary: "Slider for the sound volume.", fields: [], supportsActions: false, defaultJSON: obj("volume")),
+ 
+         // MARK: Widgets
+diff --git a/MTMR/ItemsParsing.swift b/MTMR/ItemsParsing.swift
+index a0ccbab..71fd5da 100644
+--- a/MTMR/ItemsParsing.swift
++++ b/MTMR/ItemsParsing.swift
+@@ -280,6 +280,7 @@ enum ItemType: Decodable {
+     case dock(autoResize: Bool, filter: String?)
+     case volume
+     case brightness(refreshInterval: Double)
++    case keyboardBrightness(refreshInterval: Double)
+     case weather(interval: Double, units: String, api_key: String, icon_type: String)
+     case yandexWeather(interval: Double)
+     case currency(interval: Double, from: String, to: String, full: Bool)
+@@ -339,6 +340,7 @@ enum ItemType: Decodable {
+         case dock
+         case volume
+         case brightness
++        case keyboardBrightness
+         case weather
+         case yandexWeather
+         case currency
+@@ -406,6 +408,10 @@ enum ItemType: Decodable {
+             let interval = try container.decodeIfPresent(Double.self, forKey: .refreshInterval) ?? 0.5
+             self = .brightness(refreshInterval: interval)
+ 
++        case .keyboardBrightness:
++            let interval = try container.decodeIfPresent(Double.self, forKey: .refreshInterval) ?? 0.5
++            self = .keyboardBrightness(refreshInterval: interval)
++
+         case .weather:
+             let interval = try container.decodeIfPresent(Double.self, forKey: .refreshInterval) ?? 1800.0
+             let units = try container.decodeIfPresent(String.self, forKey: .units) ?? "metric"
+diff --git a/MTMR/ShellScriptTouchBarItem.swift b/MTMR/ShellScriptTouchBarItem.swift
+index 668a4e3..aadfa4e 100644
+--- a/MTMR/ShellScriptTouchBarItem.swift
++++ b/MTMR/ShellScriptTouchBarItem.swift
+@@ -20,7 +20,7 @@ class ShellScriptTouchBarItem: CustomButtonTouchBarItem {
+     init?(identifier: NSTouchBarItem.Identifier, source: SourceProtocol, interval: TimeInterval) {
+         self.interval = interval
+         self.source = source.string ?? "echo No \"source\""
+-        super.init(identifier: identifier, title: "⏳")
++        super.init(identifier: identifier, title: "")
+         
+         forceHideConstraint = view.widthAnchor.constraint(equalToConstant: 0)
+         
+diff --git a/MTMR/TouchBarController.swift b/MTMR/TouchBarController.swift
+index fc69ff1..34f800a 100644
+--- a/MTMR/TouchBarController.swift
++++ b/MTMR/TouchBarController.swift
+@@ -41,6 +41,8 @@ extension ItemType {
+             return "com.toxblh.mtmr.volume"
+         case .brightness(refreshInterval: _):
+             return "com.toxblh.mtmr.brightness"
++        case .keyboardBrightness(refreshInterval: _):
++            return "com.toxblh.mtmr.keyboardBrightness"
+         case .weather(interval: _, units: _, api_key: _, icon_type: _):
+             return "com.toxblh.mtmr.weather"
+         case .yandexWeather(interval: _):
+@@ -127,6 +129,8 @@ class TouchBarController: NSObject, NSTouchBarDelegate {
+         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(activeApplicationChanged), name: NSWorkspace.didLaunchApplicationNotification, object: nil)
+         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(activeApplicationChanged), name: NSWorkspace.didTerminateApplicationNotification, object: nil)
+         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(activeApplicationChanged), name: NSWorkspace.didActivateApplicationNotification, object: nil)
++        startDialogWatcher()
++        startColorModeToggle()
+ 
+         reloadStandardConfig()
+     }
+@@ -183,6 +187,8 @@ class TouchBarController: NSObject, NSTouchBarDelegate {
+             swipeItems = prevSwipeItems
+             return
+         }
++
++        applyRainbow()
+         
+         let centerItems = centerIdentifiers.compactMap({ (identifier) -> NSTouchBarItem? in
+             items[identifier]
+@@ -227,7 +233,9 @@ class TouchBarController: NSObject, NSTouchBarDelegate {
+     }
+ 
+     func updateActiveApp() {
+-        if frontmostApplicationIdentifier != nil && blacklistAppIdentifiers.firstIndex(of: frontmostApplicationIdentifier!) != nil {
++        if isShowingDialog {
++            dismissTouchBar()
++        } else if frontmostApplicationIdentifier != nil && blacklistAppIdentifiers.firstIndex(of: frontmostApplicationIdentifier!) != nil {
+             dismissTouchBar()
+         } else {
+             prepareTouchBar()
+@@ -239,6 +247,67 @@ class TouchBarController: NSObject, NSTouchBarDelegate {
+         }
+     }
+     
++    // While a dialog, sheet or system prompt is in front, step aside so the app's own Touch Bar
++    // (e.g. its Save / Delete buttons) shows, and come back once it closes. Hammerspoon detects
++    // the dialogs (it holds the Accessibility permission) and posts this distributed notification
++    // with userInfo ["open": "1" | "0"].
++    private var isShowingDialog = false
++    private static let dialogNotification = Notification.Name("com.toxblh.mtmr.dialog")
++
++    func startColorModeToggle() {
++        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), nil, { _, _, _, _, _ in
++            DispatchQueue.main.async {
++                AppSettings.colorMode = (AppSettings.colorMode + 1) % 3
++                TouchBarController.shared.closeGroup()
++            }
++        }, "com.toxblh.mtmr.nextColorMode" as CFString, nil, .deliverImmediately)
++    }
++
++    // Color of the open group's button in rainbow mode, used by its slider
++    var sliderTint: NSColor?
++
++    // Rainbow mode: each item gets the next hue, red to violet, from left to right
++    private func applyRainbow() {
++        guard AppSettings.rainbow else { return }
++        let ordered = (leftIdentifiers + centerIdentifiers + rightIdentifiers).compactMap { items[$0] }
++        for (index, item) in ordered.enumerated() {
++            let color = NSColor(hue: CGFloat(index) / CGFloat(max(ordered.count - 1, 1)) * 0.83, saturation: 0.75, brightness: 1, alpha: 1)
++            if let group = item as? GroupBarItem {
++                group.tint = color
++                group.collapsedRepresentationImage = group.collapsedRepresentationImage.map { tinted($0, color) }
++            } else if let button = item as? CustomButtonTouchBarItem {
++                button.titleColor = color
++                button.image = button.image.map { tinted($0, color) }
++            }
++        }
++    }
++
++    private func tinted(_ image: NSImage, _ color: NSColor) -> NSImage {
++        let result = NSImage(size: image.size, flipped: false) { rect in
++            color.setFill()
++            rect.fill()
++            image.draw(in: rect, from: .zero, operation: .destinationIn, fraction: 1)
++            return true
++        }
++        return result
++    }
++
++    func startDialogWatcher() {
++        DistributedNotificationCenter.default().addObserver(self, selector: #selector(dialogChanged(_:)), name: Self.dialogNotification, object: nil)
++    }
++
++    @objc private func dialogChanged(_ notification: Notification) {
++        let open = notification.userInfo?["open"] as? String == "1"
++        guard open != isShowingDialog else { return }
++        isShowingDialog = open
++        DispatchQueue.main.async { self.updateActiveApp() }
++    }
++
++    // Back to the main bar from an open group (what the close button does)
++    func closeGroup() {
++        reloadPreset(path: lastPresetPath)
++    }
++
+     func touchBarContainsAnyItems() -> Bool {
+         return items.count != 0 || swipeItems.count != 0
+     }
+@@ -414,6 +483,12 @@ class TouchBarController: NSObject, NSTouchBarDelegate {
+             } else {
+                 barItem = BrightnessViewController(identifier: identifier, refreshInterval: interval)
+             }
++        case let .keyboardBrightness(refreshInterval: interval):
++            if case let .image(source)? = item.additionalParameters[.image] {
++                barItem = KeyboardBrightnessViewController(identifier: identifier, refreshInterval: interval, image: source.image)
++            } else {
++                barItem = KeyboardBrightnessViewController(identifier: identifier, refreshInterval: interval)
++            }
+         case let .weather(interval: interval, units: units, api_key: api_key, icon_type: icon_type):
+             barItem = WeatherBarItem(identifier: identifier, interval: interval, units: units, api_key: api_key, icon_type: icon_type)
+         case let .yandexWeather(interval: interval):
+@@ -460,11 +535,19 @@ class TouchBarController: NSObject, NSTouchBarDelegate {
+         if case let .background(color)? = item.additionalParameters[.background], let item = barItem as? CustomButtonTouchBarItem {
+             item.backgroundColor = color
+         }
++        if item.align == .right, let pill = (barItem as? NSCustomTouchBarItem)?.view as? SliderPill {
++            pill.closeOnLeading = true
++        }
+         if case let .width(value)? = item.additionalParameters[.width], let widthBarItem = barItem as? CanSetWidth {
+             widthBarItem.setWidth(value: value)
+         }
+-        if case let .image(source)? = item.additionalParameters[.image], let item = barItem as? CustomButtonTouchBarItem {
+-            item.image = source.image
++        if case let .image(source)? = item.additionalParameters[.image] {
++            let image = AppSettings.monochrome ? source.image.map(monochrome) : source.image
++            if let item = barItem as? GroupBarItem {
++                item.collapsedRepresentationImage = image
++            } else if let item = barItem as? CustomButtonTouchBarItem {
++                item.image = image
++            }
+         }
+         if case let .title(value)? = item.additionalParameters[.title] {
+             if let item = barItem as? GroupBarItem {
+@@ -476,6 +559,13 @@ class TouchBarController: NSObject, NSTouchBarDelegate {
+         return barItem
+     }
+     
++    // A template copy, which the Touch Bar draws white
++    private func monochrome(_ image: NSImage) -> NSImage {
++        let copy = image.copy() as! NSImage
++        copy.isTemplate = true
++        return copy
++    }
++
+     func closure(for action: Action) -> (() -> Void)? {
+         switch action.value {
+         case let .hidKey(keycode: keycode):
+@@ -627,6 +717,125 @@ extension NSPopoverTouchBarItem: CanSetWidth {
+     }
+ }
+ 
++// Control Strip style slider: small round knob on a thin track tinted with the item's color,
++// between a small and a large symbol. Used by the brightness, keyboard backlight and volume
++// sliders when no knob image is given.
++extension Notification.Name {
++    static let sliderTouched = Notification.Name("com.toxblh.mtmr.sliderTouched")
++    static let sliderReleased = Notification.Name("com.toxblh.mtmr.sliderReleased")
++}
++
++final class RoundKnobSliderCell: NSSliderCell {
++    var tint: NSColor = .controlAccentColor
++    private let knobDiameter: CGFloat = 20
++
++    override func knobRect(flipped: Bool) -> NSRect {
++        let rect = super.knobRect(flipped: flipped)
++        return NSRect(x: rect.midX - knobDiameter / 2, y: rect.midY - knobDiameter / 2, width: knobDiameter, height: knobDiameter)
++    }
++
++    override func startTracking(at startPoint: NSPoint, in controlView: NSView) -> Bool {
++        NotificationCenter.default.post(name: .sliderTouched, object: nil)
++        return super.startTracking(at: startPoint, in: controlView)
++    }
++
++    override func stopTracking(last lastPoint: NSPoint, current stopPoint: NSPoint, in controlView: NSView, mouseIsUp flag: Bool) {
++        super.stopTracking(last: lastPoint, current: stopPoint, in: controlView, mouseIsUp: flag)
++        NotificationCenter.default.post(name: .sliderReleased, object: nil)
++    }
++
++    override func drawKnob(_ knobRect: NSRect) {
++        NSColor.white.setFill()
++        NSBezierPath(ovalIn: knobRect.insetBy(dx: 1, dy: 1)).fill()
++    }
++
++    override func drawBar(inside rect: NSRect, flipped _: Bool) {
++        let bar = NSRect(x: rect.minX, y: rect.midY - 2, width: rect.width, height: 4)
++        NSColor(white: 1, alpha: 0.25).setFill()
++        NSBezierPath(roundedRect: bar, xRadius: 2, yRadius: 2).fill()
++
++        var filled = bar
++        filled.size.width = bar.width * CGFloat((doubleValue - minValue) / (maxValue - minValue))
++        tint.setFill()
++        NSBezierPath(roundedRect: filled, xRadius: 2, yRadius: 2).fill()
++    }
++}
++
++func nativeSliderView(_ slider: NSSlider, minSymbol: String, maxSymbol: String, color: NSColor) -> NSView {
++    let color = AppSettings.monochrome ? NSColor.white : AppSettings.rainbow ? TouchBarController.shared.sliderTint ?? color : color
++    let cell = RoundKnobSliderCell()
++    cell.tint = color
++    cell.minValue = slider.minValue
++    cell.maxValue = slider.maxValue
++    cell.doubleValue = slider.doubleValue
++    cell.target = slider.target
++    cell.action = slider.action
++    cell.isContinuous = true
++    slider.cell = cell
++    return SliderPill(slider: slider, minSymbol: minSymbol, maxSymbol: maxSymbol, color: color)
++}
++
++// Slider and its close button on one rounded gray background, like a single Touch Bar control.
++final class SliderPill: NSView {
++    private let stack: NSStackView
++    private let closeButton: NSButton
++
++    // A right-aligned slider opens towards the left, so its close button goes first
++    var closeOnLeading = false {
++        didSet {
++            stack.removeView(closeButton)
++            if closeOnLeading { stack.insertView(closeButton, at: 0, in: .leading) } else { stack.addView(closeButton, in: .trailing) }
++        }
++    }
++
++    init(slider: NSSlider, minSymbol: String, maxSymbol: String, color: NSColor) {
++        func icon(_ name: String, _ size: CGFloat, _ color: NSColor) -> NSImage {
++            let configuration = NSImage.SymbolConfiguration(pointSize: size, weight: .medium)
++                .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
++            return NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(configuration) ?? NSImage()
++        }
++        func imageView(_ image: NSImage) -> NSImageView {
++            let view = NSImageView(image: image)
++            view.setContentHuggingPriority(.required, for: .horizontal)
++            view.setContentCompressionResistancePriority(.required, for: .horizontal)
++            return view
++        }
++
++        closeButton = NSButton(image: icon("xmark.circle.fill", 18, NSColor(white: 1, alpha: 0.55)), target: nil, action: nil)
++        closeButton.isBordered = false
++        closeButton.setContentHuggingPriority(.required, for: .horizontal)
++        stack = NSStackView(views: [imageView(icon(minSymbol, 12, color)), slider, imageView(icon(maxSymbol, 16, color)), closeButton])
++        stack.spacing = 14
++        stack.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 10)
++        super.init(frame: .zero)
++
++        closeButton.target = self
++        closeButton.action = #selector(close)
++        wantsLayer = true
++        // Same gray and full height as the Touch Bar button bezels
++        layer?.backgroundColor = NSColor(srgbRed: 70 / 255, green: 70 / 255, blue: 70 / 255, alpha: 1).cgColor
++        layer?.cornerRadius = 6
++        heightAnchor.constraint(equalToConstant: 30).isActive = true
++
++        stack.translatesAutoresizingMaskIntoConstraints = false
++        addSubview(stack)
++        NSLayoutConstraint.activate([
++            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
++            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
++            stack.topAnchor.constraint(equalTo: topAnchor),
++            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
++        ])
++    }
++
++    required init?(coder _: NSCoder) {
++        fatalError("init(coder:) has not been implemented")
++    }
++
++    @objc private func close() {
++        TouchBarController.shared.closeGroup()
++    }
++}
++
+ extension BarItemDefinition {
+     var align: Align {
+         if case let .align(result)? = additionalParameters[.align] {
+diff --git a/MTMR/Widgets/BrightnessViewController.swift b/MTMR/Widgets/BrightnessViewController.swift
+index 8d33110..6de909c 100644
+--- a/MTMR/Widgets/BrightnessViewController.swift
++++ b/MTMR/Widgets/BrightnessViewController.swift
+@@ -4,13 +4,13 @@ import Cocoa
+ import CoreAudio
+ 
+ class BrightnessViewController: NSCustomTouchBarItem {
+-    private(set) var sliderItem: CustomSlider!
++    private(set) var sliderItem: NSSlider!
+ 
+     init(identifier: NSTouchBarItem.Identifier, refreshInterval: Double, image: NSImage? = nil) {
+         super.init(identifier: identifier)
+ 
+         if image == nil {
+-            sliderItem = CustomSlider()
++            sliderItem = NSSlider()
+         } else {
+             sliderItem = CustomSlider(knob: image!)
+         }
+@@ -20,7 +20,7 @@ class BrightnessViewController: NSCustomTouchBarItem {
+         sliderItem.maxValue = 100.0
+         sliderItem.floatValue = getBrightness() * 100
+ 
+-        view = sliderItem
++        view = image == nil ? nativeSliderView(sliderItem, minSymbol: "sun.min.fill", maxSymbol: "sun.max.fill", color: .systemYellow) : sliderItem
+ 
+         let timer = Timer.scheduledTimer(timeInterval: refreshInterval, target: self, selector: #selector(BrightnessViewController.updateBrightnessSlider), userInfo: nil, repeats: true)
+         RunLoop.current.add(timer, forMode: RunLoop.Mode.common)
+@@ -103,3 +103,83 @@ class BrightnessViewController: NSCustomTouchBarItem {
+         }
+     }
+ }
++
++// Keyboard backlight slider. Lives in this file so it needs no Xcode project changes.
++class KeyboardBrightnessViewController: NSCustomTouchBarItem {
++    private(set) var sliderItem: NSSlider!
++
++    init(identifier: NSTouchBarItem.Identifier, refreshInterval: Double, image: NSImage? = nil) {
++        super.init(identifier: identifier)
++
++        if image == nil {
++            sliderItem = NSSlider()
++        } else {
++            sliderItem = CustomSlider(knob: image!)
++        }
++        sliderItem.target = self
++        sliderItem.action = #selector(KeyboardBrightnessViewController.sliderValueChanged(_:))
++        sliderItem.minValue = 0.0
++        sliderItem.maxValue = 100.0
++        sliderItem.floatValue = getBrightness() * 100
++
++        view = image == nil ? nativeSliderView(sliderItem, minSymbol: "light.min", maxSymbol: "light.max", color: .systemTeal) : sliderItem
++
++        let timer = Timer.scheduledTimer(timeInterval: refreshInterval, target: self, selector: #selector(KeyboardBrightnessViewController.updateBrightnessSlider), userInfo: nil, repeats: true)
++        RunLoop.current.add(timer, forMode: RunLoop.Mode.common)
++    }
++
++    required init?(coder _: NSCoder) {
++        fatalError("init(coder:) has not been implemented")
++    }
++
++    @objc func updateBrightnessSlider() {
++        DispatchQueue.main.async {
++            self.sliderItem.floatValue = self.getBrightness() * 100
++        }
++    }
++
++    @objc func sliderValueChanged(_ sender: Any) {
++        if let sliderItem = sender as? NSSlider {
++            setBrightness(level: Float(sliderItem.intValue) / 100.0)
++        }
++    }
++
++    // The private CoreBrightness KeyboardBrightnessClient drives the built-in keyboard backlight.
++    // Like DisplayServices above, it is loaded at runtime so the app still launches if macOS drops it.
++    private typealias KBCopyIDs = @convention(c) (AnyObject, Selector) -> NSArray?
++    private typealias KBGetBrightness = @convention(c) (AnyObject, Selector, UInt64) -> Float
++    private typealias KBSetBrightness = @convention(c) (AnyObject, Selector, Float, UInt64) -> Bool
++
++    private static let keyboardClient: (client: NSObject, keyboard: UInt64, get: KBGetBrightness, set: KBSetBrightness)? = {
++        guard dlopen("/System/Library/PrivateFrameworks/CoreBrightness.framework/CoreBrightness", RTLD_LAZY) != nil,
++              let type = NSClassFromString("KeyboardBrightnessClient") as? NSObject.Type else { return nil }
++        let client = type.init()
++        let idsSelector = NSSelectorFromString("copyKeyboardBacklightIDs")
++        let getSelector = NSSelectorFromString("brightnessForKeyboard:")
++        let setSelector = NSSelectorFromString("setBrightness:forKeyboard:")
++        guard client.responds(to: idsSelector), client.responds(to: getSelector), client.responds(to: setSelector) else { return nil }
++        let ids = unsafeBitCast(client.method(for: idsSelector), to: KBCopyIDs.self)(client, idsSelector)
++        let keyboard = (ids?.firstObject as? NSNumber)?.uint64Value ?? 1
++        return (client, keyboard,
++                unsafeBitCast(client.method(for: getSelector), to: KBGetBrightness.self),
++                unsafeBitCast(client.method(for: setSelector), to: KBSetBrightness.self))
++    }()
++
++    private func getBrightness() -> Float {
++        guard let kb = Self.keyboardClient else { return 0 }
++        return kb.get(kb.client, NSSelectorFromString("brightnessForKeyboard:"), kb.keyboard)
++    }
++
++    private typealias KBEnableAuto = @convention(c) (AnyObject, Selector, Bool, UInt64) -> Bool
++
++    private func setBrightness(level: Float) {
++        guard let kb = Self.keyboardClient else { return }
++        // With "Adjust keyboard brightness in low light" on, a bright room keeps the backlight
++        // off and every manual change is ignored, so using the slider turns that off.
++        let autoSelector = NSSelectorFromString("enableAutoBrightness:forKeyboard:")
++        if kb.client.responds(to: autoSelector) {
++            _ = unsafeBitCast(kb.client.method(for: autoSelector), to: KBEnableAuto.self)(kb.client, autoSelector, false, kb.keyboard)
++        }
++        _ = kb.set(kb.client, NSSelectorFromString("setBrightness:forKeyboard:"), level, kb.keyboard)
++    }
++}
+diff --git a/MTMR/Widgets/GroupBarItem.swift b/MTMR/Widgets/GroupBarItem.swift
+index b7ed226..616cc15 100644
+--- a/MTMR/Widgets/GroupBarItem.swift
++++ b/MTMR/Widgets/GroupBarItem.swift
+@@ -9,6 +9,7 @@ import Cocoa
+ 
+ class GroupBarItem: NSPopoverTouchBarItem, NSTouchBarDelegate {
+     var jsonItems: [BarItemDefinition]
++    var tint: NSColor?
+ 
+     var itemDefinitions: [NSTouchBarItem.Identifier: BarItemDefinition] = [:]
+     var items: [NSTouchBarItem.Identifier: NSTouchBarItem] = [:]
+@@ -19,10 +20,38 @@ class GroupBarItem: NSPopoverTouchBarItem, NSTouchBarDelegate {
+     var scrollArea: NSCustomTouchBarItem?
+     var centerScrollArea = NSTouchBarItem.Identifier("com.toxblh.mtmr.scrollArea.".appending(UUID().uuidString))
+ 
++    // Like the Control Strip: close after the slider is released, or after a few idle seconds
++    private var closeTimer: Timer?
++    private let idleSeconds: TimeInterval = 4
++    private let afterReleaseSeconds: TimeInterval = 0.4
++
+     init(identifier: NSTouchBarItem.Identifier, items: [BarItemDefinition]) {
+         jsonItems = items
+         super.init(identifier: identifier)
+         popoverTouchBar.delegate = self
++        NotificationCenter.default.addObserver(self, selector: #selector(sliderTouched), name: .sliderTouched, object: nil)
++        NotificationCenter.default.addObserver(self, selector: #selector(sliderReleased), name: .sliderReleased, object: nil)
++    }
++
++    private func scheduleClose(after seconds: TimeInterval) {
++        closeTimer?.invalidate()
++        closeTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
++            guard let self = self else { return }
++            self.closeTimer = nil
++            if self.isOpen { TouchBarController.shared.closeGroup() }
++        }
++    }
++
++    @objc private func sliderTouched() {
++        closeTimer?.invalidate()
++    }
++
++    @objc private func sliderReleased() {
++        if isOpen { scheduleClose(after: afterReleaseSeconds) }
++    }
++
++    private var isOpen: Bool {
++        TouchBarController.shared.touchBar.delegate === self
+     }
+ 
+     required init?(coder _: NSCoder) {
+@@ -38,6 +67,7 @@ class GroupBarItem: NSPopoverTouchBarItem, NSTouchBarDelegate {
+         centerItems = []
+         rightIdentifiers = []
+ 
++        TouchBarController.shared.sliderTint = tint
+         loadItemDefinitions(jsonItems: jsonItems)
+         createItems()
+ 
+@@ -52,6 +82,8 @@ class GroupBarItem: NSPopoverTouchBarItem, NSTouchBarDelegate {
+         TouchBarController.shared.touchBar.defaultItemIdentifiers = []
+         TouchBarController.shared.touchBar.defaultItemIdentifiers = leftIdentifiers + [centerScrollArea] + rightIdentifiers
+ 
++        scheduleClose(after: idleSeconds)
++
+         if AppSettings.showControlStripState {
+             presentSystemModal(TouchBarController.shared.touchBar, systemTrayItemIdentifier: .controlStripItem)
+         } else {
+diff --git a/MTMR/Widgets/TimeTouchBarItem.swift b/MTMR/Widgets/TimeTouchBarItem.swift
+index 4a1df35..6758999 100644
+--- a/MTMR/Widgets/TimeTouchBarItem.swift
++++ b/MTMR/Widgets/TimeTouchBarItem.swift
+@@ -2,7 +2,9 @@ import Cocoa
+ 
+ class TimeTouchBarItem: CustomButtonTouchBarItem {
+     private let dateFormatter = DateFormatter()
++    private let dayFormatter = DateFormatter()
+     private var timer: Timer!
++    private var showDateUntil = Date.distantPast
+ 
+     init(identifier: NSTouchBarItem.Identifier, formatTemplate: String, timeZone: String? = nil, locale: String? = nil) {
+         dateFormatter.dateFormat = formatTemplate
+@@ -12,8 +14,26 @@ class TimeTouchBarItem: CustomButtonTouchBarItem {
+         if let abbr = timeZone {
+             dateFormatter.timeZone = TimeZone(abbreviation: abbr)
+         }
++        dayFormatter.dateFormat = "dd/MM/yy"
++        dayFormatter.timeZone = dateFormatter.timeZone
+         super.init(identifier: identifier, title: " ")
+-        timer = Timer.scheduledTimer(timeInterval: 1, target: self, selector: #selector(updateTime), userInfo: nil, repeats: true)
++        // A tap shows the date for a few seconds; another tap before then goes back to the time
++        actions.append(ItemAction(trigger: .singleTap) { [weak self] in
++            guard let self = self else { return }
++            let showing = Date() < self.showDateUntil
++            self.showDateUntil = showing ? .distantPast : Date().addingTimeInterval(4)
++            self.updateTime()
++            if !showing {
++                Timer.scheduledTimer(withTimeInterval: 4.05, repeats: false) { [weak self] _ in self?.updateTime() }
++            }
++        })
++        // Without seconds in the format, update once a minute, right when it changes
++        let showsSeconds = formatTemplate.contains("s")
++        let interval: TimeInterval = showsSeconds ? 1 : 60
++        let start = showsSeconds ? Date() : Date(timeIntervalSinceReferenceDate: (Date().timeIntervalSinceReferenceDate / 60).rounded(.down) * 60 + 60)
++        timer = Timer(fireAt: start, interval: interval, target: self, selector: #selector(updateTime), userInfo: nil, repeats: true)
++        timer.tolerance = showsSeconds ? 0.1 : 0.5
++        RunLoop.main.add(timer, forMode: .common)
+         isBordered = false
+         updateTime()
+     }
+@@ -23,6 +43,7 @@ class TimeTouchBarItem: CustomButtonTouchBarItem {
+     }
+ 
+     @objc func updateTime() {
+-        title = dateFormatter.string(from: Date())
++        let now = Date()
++        title = (now < showDateUntil ? dayFormatter : dateFormatter).string(from: now)
+     }
+ }
+diff --git a/MTMR/Widgets/VolumeViewController.swift b/MTMR/Widgets/VolumeViewController.swift
+index 2fea27a..2afd0c8 100644
+--- a/MTMR/Widgets/VolumeViewController.swift
++++ b/MTMR/Widgets/VolumeViewController.swift
+@@ -4,14 +4,14 @@ import Cocoa
+ import CoreAudio
+ 
+ class VolumeViewController: NSCustomTouchBarItem {
+-    private(set) var sliderItem: CustomSlider!
++    private(set) var sliderItem: NSSlider!
+     private var currentDeviceId: AudioObjectID = AudioObjectID(0)
+ 
+     init(identifier: NSTouchBarItem.Identifier, image: NSImage? = nil) {
+         super.init(identifier: identifier)
+ 
+         if image == nil {
+-            sliderItem = CustomSlider()
++            sliderItem = NSSlider()
+         } else {
+             sliderItem = CustomSlider(knob: image!)
+         }
+@@ -21,7 +21,7 @@ class VolumeViewController: NSCustomTouchBarItem {
+         sliderItem.maxValue = 100.0
+         sliderItem.floatValue = getInputGain() * 100
+ 
+-        view = sliderItem
++        view = image == nil ? nativeSliderView(sliderItem, minSymbol: "speaker.fill", maxSymbol: "speaker.wave.3.fill", color: .systemOrange) : sliderItem
+         
+         currentDeviceId = defaultDeviceID
+         self.addAudioRouteChangedListener()

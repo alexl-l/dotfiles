@@ -115,7 +115,7 @@ end
 
 -- Mouse: F12
 
-hs.hotkey.bind({"fn"}, "F12", function()
+local function toggleMouseJiggler()
   if mouseJigglerTimer then
     stopMouseJiggler()
     showAlert("Mouse Jiggler OFF")
@@ -123,11 +123,11 @@ hs.hotkey.bind({"fn"}, "F12", function()
     startMouseJiggler()
     showAlert("Mouse Jiggler ON")
   end
-end)
+end
 
 -- Mic: F5
 
-hs.hotkey.bind({}, "F5", function()
+local function toggleMicrophone()
   local mic = hs.audiodevice.defaultInputDevice()
 
   if not mic then
@@ -201,27 +201,211 @@ hs.hotkey.bind({}, "F5", function()
   mic:setInputMuted(isMuted)
 
   showAlert(isMuted and "Microphone Muted" or "Microphone Unmuted")
-end)
+end
 
 -- Lock EOD: F10
 
-hs.hotkey.bind({"fn"}, "F10", function()
+local function lockEndOfDay()
   stopMouseJiggler()
   showAlert("Mouse Jiggler OFF")
 
   hs.timer.doAfter(2, function()
     hs.eventtap.keyStroke({"ctrl", "cmd"}, "q")
   end)
-end)
+end
 
 -- Lock: F6
 
-hs.hotkey.bind({"fn"}, "F6", function()
+local function lockScreen()
   hs.eventtap.keyStroke({"ctrl", "cmd"}, "q")
-end)
+end
 
 -- Screenshot: F1
 
-hs.hotkey.bind({"fn"}, "F1", function()
+local function screenshot()
   hs.eventtap.keyStroke({"ctrl", "cmd"}, "9")
+end
+
+-- Spotify (MTMR play button): 1 tap play/pause, 2 taps next, 3 taps previous
+
+local spotifyTaps = 0
+local spotifyTapTimer = nil
+
+local function spotifyTap()
+  if not hs.spotify.isRunning() then
+    hs.application.launchOrFocus("Spotify")
+    return
+  end
+
+  spotifyTaps = spotifyTaps + 1
+
+  if spotifyTapTimer then
+    spotifyTapTimer:stop()
+  end
+
+  spotifyTapTimer = hs.timer.doAfter(0.35, function()
+    if spotifyTaps == 1 then
+      hs.spotify.playpause()
+    elseif spotifyTaps == 2 then
+      hs.spotify.next()
+    else
+      hs.spotify.previous()
+    end
+
+    spotifyTaps = 0
+  end)
+end
+
+hs.urlevent.bind("spotify-tap", spotifyTap)
+
+-- Dialogs: tell MTMR when a dialog, sheet or system prompt is in front, so it steps aside
+-- and the Touch Bar shows the app's own buttons (Save, Delete, Allow...)
+
+local systemPromptApps = {
+  ["com.apple.SecurityAgent"] = true,
+  ["com.apple.UserNotificationCenter"] = true,
+  ["com.apple.coreservices.uiagent"] = true,
+  ["com.apple.LocalAuthentication.UIAgent"] = true,
+  ["com.apple.CoreLocationAgent"] = true,
+  ["com.apple.accessibility.universalAccessAuthWarn"] = true
+}
+
+-- Only real dialogs count: sheets, modal windows and system dialogs. Plain "AXDialog" windows
+-- don't (apps such as Warp keep hidden ones around)
+local function isDialog(element)
+  return element:attributeValue("AXRole") == "AXSheet" or
+    element:attributeValue("AXSubrole") == "AXSystemDialog" or
+    element:attributeValue("AXModal") == true
+end
+
+local function dialogIsOpen()
+  local app = hs.application.frontmostApplication()
+
+  if not app then
+    return false
+  end
+
+  if systemPromptApps[app:bundleID() or ""] then
+    return true
+  end
+
+  local appElement = hs.axuielement.applicationElement(app)
+
+  if not appElement then
+    return false
+  end
+
+  -- Unresponsive apps must not block Hammerspoon
+  appElement:setTimeout(0.2)
+
+  -- The focused window is a sheet or alert, or has a sheet attached
+  local focusedWindow = appElement:attributeValue("AXFocusedWindow")
+
+  if not focusedWindow then
+    return false
+  end
+
+  if isDialog(focusedWindow) then
+    return true
+  end
+
+  for _, child in ipairs(focusedWindow:attributeValue("AXChildren") or {}) do
+    if isDialog(child) then
+      return true
+    end
+  end
+
+  -- Focus inside a dialog (e.g. on its default button)
+  local element = appElement:attributeValue("AXFocusedUIElement")
+
+  for _ = 1, 12 do
+    if not element or element == focusedWindow then
+      break
+    end
+
+    if isDialog(element) then
+      return true
+    end
+
+    element = element:attributeValue("AXParent")
+  end
+
+  return false
+end
+
+-- Event driven, so it costs nothing while idle: checks only when the front app, its focused
+-- window or focused element changes, or a window or sheet appears
+local dialogOpen = false
+local dialogCheck = nil
+local dialogObserver = nil
+
+local function postDialogState()
+  hs.distributednotifications.post("com.toxblh.mtmr.dialog", nil, { open = dialogOpen and "1" or "0" })
+end
+
+local function checkDialog()
+  local ok, open = pcall(dialogIsOpen)
+  open = ok and open
+
+  if open ~= dialogOpen then
+    dialogOpen = open
+    postDialogState()
+  end
+end
+
+local function scheduleDialogCheck()
+  if dialogCheck then
+    dialogCheck:stop()
+  end
+
+  dialogCheck = hs.timer.doAfter(0.15, checkDialog)
+end
+
+local function observeApp(app)
+  if dialogObserver then
+    dialogObserver:stop()
+    dialogObserver = nil
+  end
+
+  local appElement = app and hs.axuielement.applicationElement(app)
+
+  if appElement then
+    dialogObserver = hs.axuielement.observer.new(app:pid())
+      :callback(scheduleDialogCheck)
+
+    for _, notification in ipairs({ "AXFocusedWindowChanged", "AXFocusedUIElementChanged", "AXWindowCreated", "AXSheetCreated" }) do
+      pcall(function() dialogObserver:addWatcher(appElement, notification) end)
+    end
+
+    dialogObserver:start()
+  end
+
+  scheduleDialogCheck()
+end
+
+dialogAppWatcher = hs.application.watcher.new(function(_, event, app)
+  if event == hs.application.watcher.activated then
+    observeApp(app)
+  elseif event == hs.application.watcher.launched and app and app:bundleID() == "Toxblh.MTMR" then
+    -- MTMR (re)started: tell it the current state once it is listening
+    hs.timer.doAfter(3, postDialogState)
+  end
 end)
+
+dialogAppWatcher:start()
+observeApp(hs.application.frontmostApplication())
+
+-- Bindings: keyboard shortcuts and hammerspoon:// URLs (used by MTMR)
+
+local actions = {
+  { mods = {"fn"}, key = "F12", url = "toggle-jiggler", fn = toggleMouseJiggler },
+  { mods = {},     key = "F5",  url = "toggle-mic",     fn = toggleMicrophone },
+  { mods = {"fn"}, key = "F10", url = "lock-eod",       fn = lockEndOfDay },
+  { mods = {"fn"}, key = "F6",  url = "lock",           fn = lockScreen },
+  { mods = {"fn"}, key = "F1",  url = "screenshot",     fn = screenshot }
+}
+
+for _, action in ipairs(actions) do
+  hs.hotkey.bind(action.mods, action.key, action.fn)
+  hs.urlevent.bind(action.url, function() action.fn() end)
+end
